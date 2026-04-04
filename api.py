@@ -20,7 +20,7 @@ from Utilities import Utilities as ut
 load_dotenv()
 from EstructuraJson import EstructuraJsonRips
 import RipsQueries as queries
-import ToBase64 as b64
+import Utilities as b64
 from RipsSender import RipsSender
 from capita_scheduler import init_scheduler, shutdown_scheduler, get_scheduler_status, ejecutar_envio_manual, get_capitas_pendientes
 import warnings

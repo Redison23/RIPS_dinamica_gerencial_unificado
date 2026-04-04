@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sql_server_conn import SQLServerConnection, PostgreSQLConnection as PSQL
 from EstructuraJson import EstructuraJsonRips
 import RipsQueries as queries
-import ToBase64 as b64
+import Utilities as b64
 
 
 def validar_estructura_fev_rips_payload(payload: Dict[str, Any]) -> Optional[str]:
