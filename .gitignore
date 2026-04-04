@@ -1,47 +1,51 @@
-# Ignorar archivos de entorno
+# ---------- Config sensible ----------
 .env
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.dll
-*.dylib
+.env.*
+!.env.example
 
-# Logs
+# ---------- Carpetas locales/no versionar ----------
+certs/
 logs/
-*.log
-
-# Certificados y llaves locales
-certs/*.crt
-certs/*.key
-certs/*.pfx
-certs/*.pem
-certs/*.p12
-certs/*.bak
-
-# Entornos virtuales
+tmp/
+temp/
 venv/
+venc/
 env/
 ENV/
-.venv
+.venv/
 
-# IDEs
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- Build / distribucion ----------
+build/
+dist/
+*.egg-info/
+
+# ---------- IDE / Editor ----------
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Sistema operativo
+# ---------- Sistema operativo ----------
 .DS_Store
 Thumbs.db
 
-# Temporales
+# ---------- Temporales ----------
 *.tmp
-temp/
-tmp/
+*.temp
+*.bak
+*.pid
 
-# Archivos accidentales (ej: comandos pegados como nombre de archivo)
+# ---------- Archivos accidentales ----------
 \#*
