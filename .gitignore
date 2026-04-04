@@ -13,10 +13,13 @@ __pycache__/
 logs/
 *.log
 
-# Certificados (excepto .bak)
+# Certificados y llaves locales
 certs/*.crt
 certs/*.key
-!certs/*.bak
+certs/*.pfx
+certs/*.pem
+certs/*.p12
+certs/*.bak
 
 # Entornos virtuales
 venv/
@@ -39,3 +42,6 @@ Thumbs.db
 *.tmp
 temp/
 tmp/
+
+# Archivos accidentales (ej: comandos pegados como nombre de archivo)
+\#*
