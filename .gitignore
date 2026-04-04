@@ -1,0 +1,41 @@
+# Ignorar archivos de entorno
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.dll
+*.dylib
+
+# Logs
+logs/
+*.log
+
+# Certificados (excepto .bak)
+certs/*.crt
+certs/*.key
+!certs/*.bak
+
+# Entornos virtuales
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Temporales
+*.tmp
+temp/
+tmp/

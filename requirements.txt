@@ -1,0 +1,30 @@
+# =============================================================================
+# API Unificada - Hospital San José de Quimbaya
+# Dependencias consolidadas de ambas APIs
+# =============================================================================
+
+# Framework web (FastAPI)
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.3
+pydantic-settings>=2.1.0
+
+# Base de datos
+pyodbc>=5.0.1
+psycopg2-binary>=2.9.11
+
+# HTTP y requests
+requests>=2.31.0
+
+# Procesamiento de datos
+pandas>=2.1.4
+lxml>=4.9.4
+
+# Configuración
+python-dotenv>=1.0.0
+
+# Scheduler (envío automático de capitas)
+apscheduler>=3.10.0
+
+# Servicio Windows (api_service.py)
+pywin32>=311; sys_platform == "win32"
