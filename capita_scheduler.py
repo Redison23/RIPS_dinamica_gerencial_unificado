@@ -11,8 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
-from sql_server_conn import SQLServerConnection
-from Connection import PostgreSQLConnection as PSQL
+from sql_server_conn import SQLServerConnection, PostgreSQLConnection as PSQL
 from EstructuraJson import EstructuraJsonRips
 import RipsQueries as queries
 import ToBase64 as b64

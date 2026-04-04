@@ -1,7 +1,9 @@
 import pyodbc
-import json
+import psycopg2
+import psycopg2.extras
 from decimal import Decimal
 from datetime import datetime, date
+
 
 class SQLServerConnection(object):
     def __init__(self, server, database, username=None, password=None, driver=None, trusted_connection=False):
@@ -16,7 +18,6 @@ class SQLServerConnection(object):
     def connect(self):
         try:
             if self.trusted_connection:
-                # Conexión con autenticación de Windows
                 connection_string = (
                     f"DRIVER={self.driver};"
                     f"SERVER={self.server};"
@@ -24,7 +25,6 @@ class SQLServerConnection(object):
                     f"Trusted_Connection=yes;"
                 )
             else:
-                # Conexión con usuario y contraseña
                 connection_string = (
                     f"DRIVER={self.driver};"
                     f"SERVER={self.server};"
@@ -32,85 +32,127 @@ class SQLServerConnection(object):
                     f"UID={self.username};"
                     f"PWD={self.password};"
                 )
-            
+
             self.conn = pyodbc.connect(connection_string)
-            print("Conexión exitosa a la base de datos SQL Server")
+            print("Conexion exitosa a la base de datos SQL Server")
             return True
         except Exception as e:
-            print(f"Error de conexión: {e}")
+            print(f"Error de conexion: {e}")
             return False
 
     def _convert_row_to_dict(self, cursor, row):
-        """Convierte una fila en un diccionario manteniendo los nombres exactos de las columnas"""
         if row is None:
             return None
-        
+
         columns = [column[0] for column in cursor.description]
         row_dict = {}
-        
+
         for i, value in enumerate(row):
             column_name = columns[i]
-            # Convertir tipos especiales para serialización JSON si es necesario
-            if isinstance(value, (Decimal,)):
+            if isinstance(value, Decimal):
                 value = float(value)
             elif isinstance(value, (datetime, date)):
                 value = value.isoformat() if value else None
-            
             row_dict[column_name] = value
-        
+
         return row_dict
 
     def execute_query(self, query, params=None, fetch_one=False):
-        """
-        Ejecuta una consulta SQL y devuelve los resultados como diccionarios si es SELECT,
-        manteniendo los nombres exactos de las columnas de la base de datos.
-        Para consultas UPDATE, INSERT, DELETE devuelve el número de filas afectadas.
-        
-        Args:
-            query (str): Consulta SQL a ejecutar
-            params (tuple): Parámetros para la consulta
-            fetch_one (bool): Si True, devuelve solo un registro (fetchone)
-        """
         if not self.conn:
-            print("No hay conexión a la base de datos. Intentando reconectar...")
+            print("No hay conexion a la base de datos. Intentando reconectar...")
             self.connect()
-            
+
         try:
             cursor = self.conn.cursor()
-            
-            # Ejecutar la consulta con o sin parámetros
             if params:
                 cursor.execute(query, params)
             else:
                 cursor.execute(query)
-            
-            # Verificar si es una consulta SELECT o similar que devuelve resultados
+
             if query.strip().upper().startswith("SELECT") or "OUTPUT" in query.upper():
                 if fetch_one:
                     row = cursor.fetchone()
                     result = self._convert_row_to_dict(cursor, row)
                     cursor.close()
                     return result
-                else:
-                    rows = cursor.fetchall()
-                    results = [self._convert_row_to_dict(cursor, row) for row in rows]
-                    cursor.close()
-                    return results
-            else:
-                # Para UPDATE, INSERT, DELETE sin OUTPUT
-                self.conn.commit()
-                rows_affected = cursor.rowcount
+                rows = cursor.fetchall()
+                results = [self._convert_row_to_dict(cursor, row) for row in rows]
                 cursor.close()
-                return rows_affected  # Devuelve el número de filas afectadas
-                
+                return results
+
+            self.conn.commit()
+            rows_affected = cursor.rowcount
+            cursor.close()
+            return rows_affected
+
         except Exception as e:
             self.conn.rollback()
             print(f"Error ejecutando la consulta: {str(e)}")
             print(f"Query: {query}")
-            print(f"Parámetros: {params}")
+            print(f"Parametros: {params}")
             raise e
 
     def close(self):
         if self.conn:
             self.conn.close()
-            print("Conexión cerrada")
+            print("Conexion cerrada")
+
+
+class PostgreSQLConnection(object):
+    def __init__(self, dbname, user, password, host, port=5432):
+        self.dbname = dbname
+        self.user = user
+        self.password = password
+        self.host = host
+        self.port = port
+        self.conn = None
+
+    def connect(self):
+        try:
+            self.conn = psycopg2.connect(
+                dbname=self.dbname,
+                user=self.user,
+                password=self.password,
+                host=self.host,
+                port=self.port,
+            )
+            print("Conexion exitosa a la base de datos PostgreSQL")
+            return True
+        except Exception as e:
+            print(f"Error de conexion: {e}")
+            return False
+
+    def execute_query(self, query, params=None, fetch_one=False):
+        if not self.conn:
+            print("No hay conexion a la base de datos. Intentando reconectar...")
+            self.connect()
+
+        try:
+            cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(query, params)
+
+            if query.strip().upper().startswith("SELECT") or "RETURNING" in query.upper():
+                if fetch_one:
+                    result = cursor.fetchone()
+                    cursor.close()
+                    return result
+                results = cursor.fetchall()
+                cursor.close()
+                return results
+
+            self.conn.commit()
+            rows_affected = cursor.rowcount
+            cursor.close()
+            return rows_affected
+
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error ejecutando la consulta: {str(e)}")
+            print(f"Query: {query}")
+            print(f"Parametros: {params}")
+            raise e
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+            print("Conexion cerrada")

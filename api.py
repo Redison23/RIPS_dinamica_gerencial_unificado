@@ -13,8 +13,7 @@ from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional
 import uvicorn
 from dotenv import load_dotenv
-from sql_server_conn import SQLServerConnection
-from Connection import PostgreSQLConnection as PSQL
+from sql_server_conn import SQLServerConnection, PostgreSQLConnection as PSQL
 from Utilities import Utilities as ut
 
 # Cargar variables de entorno
