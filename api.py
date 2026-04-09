@@ -1150,7 +1150,8 @@ def envio_capita_inicial(request: EnvioCapitaRequest = Body(...)):
         )
         
         if not auth_result['success']:
-            raise HTTPException(status_code=500, detail='Error en autenticacion con el ministerio')
+            logger.error(f"[CAPITA INICIAL] Autenticacion fallida para {factura_global}: {auth_result.get('error', 'Sin detalle')} - {auth_result.get('message', '')}")
+            raise HTTPException(status_code=500, detail=f"Error en autenticacion con el ministerio: {auth_result.get('error', 'Sin detalle')}")
         
         # Crear estructura only_xml
         json_factura_capita = EstructuraJsonRips.only_xml()
@@ -1163,7 +1164,7 @@ def envio_capita_inicial(request: EnvioCapitaRequest = Body(...)):
             if datos_xml:
                 xml_data = datos_xml[0].get('attached_document', "")
         except Exception as xml_error:
-            print(f"[ERROR] Error obteniendo XML: {xml_error}")
+            logger.error(f"[CAPITA INICIAL] Error obteniendo XML para {factura_global}: {xml_error}")
             raise HTTPException(status_code=500, detail=f'Error obteniendo XML: {str(xml_error)}')
         finally:
             connPostgre.close()
@@ -1217,6 +1218,8 @@ def envio_capita_inicial(request: EnvioCapitaRequest = Body(...)):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        logger.error(f"[CAPITA INICIAL] Error general en factura {request.factura_global}: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f'Error general: {str(e)}')
     finally:
         if conn and getattr(conn, "conn", None):
@@ -1251,7 +1254,8 @@ def envio_capita_final(request: EnvioCapitaRequest = Body(...)):
         )
         
         if not auth_result['success']:
-            raise HTTPException(status_code=500, detail='Error en autenticacion con el ministerio')
+            logger.error(f"[CAPITA FINAL] Autenticacion fallida para {factura_global_param}: {auth_result.get('error', 'Sin detalle')} - {auth_result.get('message', '')}")
+            raise HTTPException(status_code=500, detail=f"Error en autenticacion con el ministerio: {auth_result.get('error', 'Sin detalle')}")
         
         conn = conSqlServer
         
@@ -1399,7 +1403,8 @@ def envio_capita_final(request: EnvioCapitaRequest = Body(...)):
         except HTTPException:
             raise
         except Exception as e:
-            print(f"[ERROR] Error procesando facturacin capita FINAL: {e}")
+            import traceback
+            logger.error(f"[CAPITA FINAL] Error procesando factura {factura_global_param}: {str(e)}\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f'Error procesando facturacin: {str(e)}')
         finally:
             conn.close()
@@ -1407,6 +1412,8 @@ def envio_capita_final(request: EnvioCapitaRequest = Body(...)):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        logger.error(f"[CAPITA FINAL] Error general en factura {request.factura_global}: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f'Error general: {str(e)}')
 
 @app.post("/capita/obtener-json", tags=["Envio CAPITA"])
