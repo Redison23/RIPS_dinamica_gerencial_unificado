@@ -621,20 +621,37 @@ def get_facturas_filtro_avanzado(
             contrato = contrato.strip()
             contrato_codigo_match = re.match(r"^\s*(\d+)\s*(?:-|$)", contrato)
             if contrato_codigo_match:
-                # Si llega "1015001" o "1015001 - NOMBRE", filtra solo por codigo.
+                # Si llega "1015001" o "1015001 - NOMBRE", filtra solo por codigo numerico.
                 query_base += """
-                AND LTRIM(RTRIM(COALESCE(NULLIF(AF.codigo_contrato, ''), FG.Codigo_Contrato))) = LTRIM(RTRIM(?))
+                AND (
+                    LTRIM(RTRIM(AF.codigo_contrato)) = LTRIM(RTRIM(?))
+                    OR LTRIM(RTRIM(FG.Codigo_Contrato)) = LTRIM(RTRIM(?))
+                )
                 """
-                params.append(contrato_codigo_match.group(1))
+                codigo = contrato_codigo_match.group(1)
+                params.extend([codigo, codigo])
             else:
-                query_base += """
-                AND LTRIM(RTRIM(CONCAT(
-                    ISNULL(NULLIF(LTRIM(RTRIM(AF.codigo_contrato)), ''), ISNULL(FG.Codigo_Contrato, '')),
-                    ' - ',
-                    ISNULL(NULLIF(LTRIM(RTRIM(AF.Contrato)), ''), ISNULL(FG.Contrato, ''))
-                ))) = LTRIM(RTRIM(?))
-                """
-                params.append(contrato)
+                # Codigo no numerico (ej: "01_EVN_890001006 - NUEVA EPS S.A. CONTRIBUTIVO")
+                # Extraer la parte del codigo antes del " - " y buscar en ambas tablas.
+                contrato_code_name_match = re.match(r"^\s*(.+?)\s+-\s+(.+)$", contrato)
+                if contrato_code_name_match:
+                    codigo = contrato_code_name_match.group(1).strip()
+                    query_base += """
+                    AND (
+                        LTRIM(RTRIM(AF.codigo_contrato)) = LTRIM(RTRIM(?))
+                        OR LTRIM(RTRIM(FG.Codigo_Contrato)) = LTRIM(RTRIM(?))
+                    )
+                    """
+                    params.extend([codigo, codigo])
+                else:
+                    # Codigo suelto sin " - " (ej: "01_EVN_890001006")
+                    query_base += """
+                    AND (
+                        LTRIM(RTRIM(AF.codigo_contrato)) = LTRIM(RTRIM(?))
+                        OR LTRIM(RTRIM(FG.Codigo_Contrato)) = LTRIM(RTRIM(?))
+                    )
+                    """
+                    params.extend([contrato, contrato])
         
         if tipo_entidad:
             query_base += " AND FG.Tipo_Entidad = ?"
@@ -1793,7 +1810,8 @@ if __name__ == "__main__":
             ssl_keyfile=key_file,
             reload=reload_enabled,
             use_colors=False,
-            access_log=False
+            access_log=False,
+            timeout_keep_alive=120
         )
     else:
         print("=" * 70)
@@ -1814,7 +1832,8 @@ if __name__ == "__main__":
             port=int(os.getenv("API_PORT", "8000")),
             reload=reload_enabled,
             use_colors=False,
-            access_log=False
+            access_log=False,
+            timeout_keep_alive=120
         )
 
 
