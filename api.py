@@ -23,6 +23,12 @@ import RipsQueries as queries
 import Utilities as b64
 from RipsSender import RipsSender
 from capita_scheduler import init_scheduler, shutdown_scheduler, get_scheduler_status, ejecutar_envio_manual, get_capitas_pendientes
+from evento_scheduler import (
+    init_evento_scheduler,
+    shutdown_evento_scheduler,
+    get_evento_scheduler_status,
+    get_eventos_pendientes,
+)
 import warnings
 import json
 import re
@@ -108,6 +114,12 @@ async def lifespan(app: FastAPI):
         print(f"[WARN] Error iniciando scheduler de capitas: {e}")
 
     try:
+        init_evento_scheduler()
+        print("[OK] Scheduler de envio automatico EVENTO activado")
+    except Exception as e:
+        print(f"[WARN] Error iniciando scheduler de eventos: {e}")
+
+    try:
         yield
     finally:
         try:
@@ -115,12 +127,17 @@ async def lifespan(app: FastAPI):
             print("[OK] Scheduler de capitas detenido")
         except Exception as e:
             print(f"[WARN] Error deteniendo scheduler: {e}")
+        try:
+            shutdown_evento_scheduler()
+            print("[OK] Scheduler de eventos detenido")
+        except Exception as e:
+            print(f"[WARN] Error deteniendo scheduler de eventos: {e}")
 
 # Crear instancia de FastAPI
 app = FastAPI(
-    title="API Unificada - Hospital Sagrado Corazon de Jesus",
-    version="2.0.0",
-    description="API unificada para exposicion de datos RIPS y envio de facturas CAPITA",
+    title="KIROX-FEVRIPS - Hospital Sagrado Corazon de Jesus",
+    version="2.1.0",
+    description="Proyecto unificado: exposicion de datos RIPS, envio CAPITA y envio automatico EVENTO",
     lifespan=lifespan
 )
 
@@ -195,6 +212,12 @@ def root():
             "sistema": "/health"
         }
     }
+
+@app.get("/ping", tags=["Info"])
+def ping():
+    """Sonda liviana para el watchdog: responde al instante sin tocar BD ni ministerio.
+    Sirve para distinguir 'proceso vivo y event loop responsivo' de 'BD caida'."""
+    return {"status": "ok"}
 
 @app.get("/health", tags=["Info"])
 def health_check():
@@ -1771,6 +1794,56 @@ def ejecutar_envio_capitas_manual():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'Error ejecutando envio manual: {str(e)}')
+
+
+# =============================================================================
+# ENDPOINTS DE SCHEDULER DE EVENTO (envio automatico cada 30 min)
+# =============================================================================
+
+@app.get("/evento/scheduler/status", tags=["Scheduler EVENTO"])
+def get_evento_scheduler_status_endpoint():
+    """Estado del scheduler de envio automatico de facturas EVENTO."""
+    try:
+        return {"success": True, "scheduler": get_evento_scheduler_status()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Error obteniendo estado del scheduler EVENTO: {str(e)}')
+
+
+@app.get("/evento/scheduler/pendientes", tags=["Scheduler EVENTO"])
+def get_eventos_pendientes_endpoint():
+    """Lista de facturas EVENTO pendientes de envio (sin CUV, ultimos 40 dias)."""
+    try:
+        pendientes = get_eventos_pendientes()
+        return {
+            "success": True,
+            "total_pendientes": len(pendientes),
+            "eventos_pendientes": pendientes
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Error obteniendo eventos pendientes: {str(e)}')
+
+
+@app.post("/evento/scheduler/ejecutar-ahora", tags=["Scheduler EVENTO"])
+def ejecutar_envio_eventos_manual():
+    """
+    Ejecuta manualmente el envio de todas las facturas EVENTO pendientes.
+
+    ADVERTENCIA: puede tardar varios minutos segun el numero de facturas pendientes.
+    """
+    try:
+        from evento_scheduler import job_enviar_eventos
+
+        import threading
+        thread = threading.Thread(target=job_enviar_eventos)
+        thread.start()
+
+        return {
+            "success": True,
+            "message": "Proceso de envio de eventos iniciado en segundo plano. Revisa los logs para ver el progreso.",
+            "log_file": "logs/evento_scheduler.log"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Error ejecutando envio manual de eventos: {str(e)}')
 
 
 # =============================================================================

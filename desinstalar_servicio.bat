@@ -1,6 +1,6 @@
 @echo off
 echo ================================================
-echo Desinstalador del Servicio API Unificada
+echo Desinstalador del Servicio KIROX-FEVRIPS
 echo Hospital Sagrado Corazon de Jesus de Quimbaya
 echo ================================================
 echo.
@@ -19,16 +19,20 @@ cd /d "%~dp0"
 echo Directorio actual: %CD%
 echo.
 
+REM Usar el Python del venv si existe
+set "PYEXE=python"
+if exist "%~dp0venv\Scripts\python.exe" set "PYEXE=%~dp0venv\Scripts\python.exe"
+
 echo Deteniendo servicio...
-python "%~dp0api_service.py" stop
+"%PYEXE%" "%~dp0api_service.py" stop
 
 echo.
 echo Desinstalando servicio...
-python "%~dp0api_service.py" remove
+"%PYEXE%" "%~dp0api_service.py" remove
 
 echo.
 echo ================================================
-echo Servicio desinstalado correctamente!
+echo Servicio KIROX-FEVRIPS desinstalado correctamente!
 echo ================================================
 echo.
 pause
