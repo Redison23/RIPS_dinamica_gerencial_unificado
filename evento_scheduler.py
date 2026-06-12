@@ -122,10 +122,13 @@ def get_eventos_pendientes():
         conn.close()
 
 
-def enviar_evento_individual(num_factura: str) -> dict:
+def enviar_evento_individual(num_factura: str, sender) -> dict:
     """
     Envia una factura EVENTO al ministerio reutilizando la misma logica y persistencia
     que el endpoint /ministerio/envio/fev-rips.
+
+    Recibe un `sender` ya autenticado (se autentica una sola vez por corrida del job,
+    no por factura) para no hacer cientos de logins contra el ministerio.
     """
     evento_logger.info(f"[INICIO] Procesando evento: {num_factura}")
 
@@ -143,8 +146,7 @@ def enviar_evento_individual(num_factura: str) -> dict:
         # Construir payload (RIPS + XML base64) - misma utilidad que el endpoint
         payload = construir_payload_fev_rips_desde_num_factura(num_factura, conn_sql, conn_postgre)
 
-        # Enviar al ministerio
-        sender = _sender_autenticado()
+        # Enviar al ministerio (sender ya autenticado)
         result = sender.send_paquete(
             payload_json=payload,
             tipo_paquete="FEV_RIPS",
@@ -223,12 +225,22 @@ def job_enviar_eventos():
 
     evento_logger.info(f"Facturas EVENTO pendientes encontradas: {len(pendientes)}")
 
+    # Autenticar UNA sola vez por corrida. Si el ministerio no responde
+    # (p.ej. gateway 172.16.0.17 caido), se aborta la corrida en vez de
+    # intentar cientos de logins que se cuelgan.
+    try:
+        sender = _sender_autenticado()
+    except Exception as e:
+        evento_logger.error(f"[ABORTA] No se pudo autenticar con el ministerio: {e}. Se omite esta corrida.")
+        evento_logger.info("=" * 70)
+        return
+
     exitosas = []
     fallidas = []
 
     for i, num_factura in enumerate(pendientes, 1):
         evento_logger.info(f"[{i}/{len(pendientes)}] Procesando: {num_factura}")
-        resultado = enviar_evento_individual(num_factura)
+        resultado = enviar_evento_individual(num_factura, sender)
         if resultado.get('success'):
             exitosas.append(num_factura)
         else:
