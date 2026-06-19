@@ -42,6 +42,8 @@ from logging.handlers import TimedRotatingFileHandler
 from fev_rips_payload_utils import (
     validar_estructura_fev_rips_payload,
     construir_payload_fev_rips_desde_num_factura,
+    limpiar_diagnosticos_duplicados,
+    normalizar_payload_capita,
 )
 from models.request_models import (
     NotificacionesEventoRequest,
@@ -904,6 +906,30 @@ def envio_ministerio_fev_rips(request: EnvioMinisterioFevRipsRequest = Body(...)
             conn_postgre.connect()
             payload = construir_payload_fev_rips_desde_num_factura(numero_factura, conn_sql, conn_postgre)
 
+        # Exigir número de factura resoluble: nunca se envía sin poder verificar el CUV.
+        if not numero_factura:
+            raise HTTPException(
+                status_code=400,
+                detail="No se pudo determinar el número de factura (num_factura o payload.rips.numFactura). No se envía sin poder verificar el CUV."
+            )
+
+        # No reenviar si la factura ya tiene CUV (ya fue enviada/aprobada): reenviarla
+        # sobrescribiría los soportes ya guardados.
+        if conn_sql is None:
+            conn_sql = ut.get_db_connection()
+        cuv_existente = RipsSender.factura_tiene_cuv_valido(conn_sql, numero_factura, tipo_cargue='INICIAL')
+        if cuv_existente:
+            logger.info(f"[FEV-RIPS] {numero_factura} ya tiene CUV; se omite el reenvío")
+            return {
+                "success": True,
+                "skipped": True,
+                "tipo_paquete": "FEV_RIPS",
+                "numero_factura": numero_factura,
+                "payload_origen": payload_origen,
+                "codigo_cuv": cuv_existente,
+                "message": "La factura ya tiene CUV (ya fue enviada al Ministerio). No se reenvía para no sobrescribir el CUV y los soportes existentes."
+            }
+
         sender = get_ministerio_sender_autenticado()
         result = sender.send_paquete(
             payload_json=payload,
@@ -1014,7 +1040,7 @@ def envio_capita_periodo(request: EnvioCapitaRequest = Body(...)):
 
         # Obtener facturas relacionadas a la global (misma logica de envio final)
         query = """
-            SELECT [numFactura], id_factura, factura_global
+            SELECT [numFactura], id_factura, factura_global, fecha_factura
             FROM dbo.rips_af
             WHERE tipo_factura = 'C'
               AND estado_registro = 'A'
@@ -1030,6 +1056,20 @@ def envio_capita_periodo(request: EnvioCapitaRequest = Body(...)):
             )
 
         factura_global = facturas[0]['factura_global']
+
+        # No reenviar si la factura ya tiene CUV global (ya fue enviada y aprobada):
+        # reenviarla sobrescribiría los soportes ya guardados.
+        cuv_existente = RipsSender.factura_tiene_cuv_valido(conn, factura_global, tipo_cargue='FINAL')
+        if cuv_existente:
+            logger.info(f"[CAPITA PERIODO] {factura_global} ya tiene CUV global; se omite el reenvío")
+            return {
+                'success': True,
+                'skipped': True,
+                'factura_global': factura_global,
+                'tipo_cargue': 'PERIODO',
+                'codigo_cuv_global': cuv_existente,
+                'message': 'La factura ya tiene CUV global (ya fue enviada y aprobada). No se reenvía para no sobrescribir el CUV y los soportes existentes.'
+            }
 
         # Construir JSON base (RIPS + XML)
         json_factura_capita = EstructuraJsonRips.get_base_json()
@@ -1105,6 +1145,15 @@ def envio_capita_periodo(request: EnvioCapitaRequest = Body(...)):
         if not base64_xml:
             raise HTTPException(status_code=500, detail='Error convirtiendo XML a Base64')
         json_factura_capita["xmlFevFile"] = base64_xml
+
+        # Normalizar payload para reducir rechazos del Ministerio (diagnósticos duplicados,
+        # tipo doc/usuario, fechas fuera de periodo RVC014/RVC039, usuarios sin servicios).
+        resumen_norm = normalizar_payload_capita(
+            json_factura_capita,
+            fecha_factura=facturas[0].get('fecha_factura'),
+            xml_data=xml_data,
+        )
+        print(f"[NORMALIZACION] {factura_global} (PERIODO): {resumen_norm}")
 
         # ---- Enviar CAPITA_PERIODO ----
         result = sender.send_paquete(
@@ -1192,7 +1241,21 @@ def envio_capita_inicial(request: EnvioCapitaRequest = Body(...)):
         if not auth_result['success']:
             logger.error(f"[CAPITA INICIAL] Autenticacion fallida para {factura_global}: {auth_result.get('error', 'Sin detalle')} - {auth_result.get('message', '')}")
             raise HTTPException(status_code=500, detail=f"Error en autenticacion con el ministerio: {auth_result.get('error', 'Sin detalle')}")
-        
+
+        # No reenviar si la factura ya tiene CUV inicial (no sobrescribir lo ya aprobado)
+        conn = conSqlServer
+        cuv_existente = RipsSender.factura_tiene_cuv_valido(conn, factura_global, tipo_cargue='INICIAL')
+        if cuv_existente:
+            logger.info(f"[CAPITA INICIAL] {factura_global} ya tiene CUV; se omite el reenvío")
+            return {
+                'success': True,
+                'skipped': True,
+                'factura_global': factura_global,
+                'tipo_cargue': 'INICIAL',
+                'codigo_cuv': cuv_existente,
+                'message': 'La factura ya tiene CUV (ya fue enviada al Ministerio). No se reenvía para no sobrescribir el CUV y los datos existentes.'
+            }
+
         # Crear estructura only_xml
         json_factura_capita = EstructuraJsonRips.only_xml()
         
@@ -1230,7 +1293,8 @@ def envio_capita_inicial(request: EnvioCapitaRequest = Body(...)):
         
         # Actualizar estado en BD
         conn = conSqlServer
-        conn.connect()
+        if not getattr(conn, "conn", None):
+            conn.connect()
         update_success = sender.update_invoice_status(conn, factura_global, result, tipo_cargue='INICIAL')
         
         # Guardar JSON soporte
@@ -1303,7 +1367,7 @@ def envio_capita_final(request: EnvioCapitaRequest = Body(...)):
         try:
             conn.connect()
             
-            query = """ SELECT [numFactura], id_factura, factura_global
+            query = """ SELECT [numFactura], id_factura, factura_global, fecha_factura
                         FROM dbo.rips_af
                         WHERE tipo_factura = 'C'
                         AND estado_registro = 'A'
@@ -1320,13 +1384,32 @@ def envio_capita_final(request: EnvioCapitaRequest = Body(...)):
                 )
             
             factura_global = facturas[0]['factura_global']
-            
+
         except HTTPException:
             raise
         except Exception as e:
             conn.close()
             raise HTTPException(status_code=500, detail=f'Error consultando facturas: {str(e)}')
-        
+
+        # No reenviar si la factura ya tiene CUV global (no sobrescribir lo ya aprobado).
+        # El guard es fail-closed: si no puede verificar, lanza; cerramos conn y propagamos.
+        try:
+            cuv_existente = RipsSender.factura_tiene_cuv_valido(conn, factura_global, tipo_cargue='FINAL')
+        except Exception:
+            conn.close()
+            raise
+        if cuv_existente:
+            conn.close()
+            logger.info(f"[CAPITA FINAL] {factura_global} ya tiene CUV global; se omite el reenvío")
+            return {
+                'success': True,
+                'skipped': True,
+                'factura_global': factura_global,
+                'tipo_cargue': 'FINAL',
+                'codigo_cuv_global': cuv_existente,
+                'message': 'La factura ya tiene CUV global (ya fue enviada y aprobada). No se reenvía para no sobrescribir el CUV y los datos existentes.'
+            }
+
         # Procesar facturacin capita - SOLO JSON (sin XML)
         print(f"[PROCESO] Procesando {len(df_facturas)} facturas de capita para factura global: {factura_global} (FINAL)")
         
@@ -1403,7 +1486,16 @@ def envio_capita_final(request: EnvioCapitaRequest = Body(...)):
                     json_factura_capita["rips"]["usuarios"].append(usuario_final)
                 
                 print(f"[OK] JSON capita FINAL creado con {len(json_factura_capita['rips']['usuarios'])} usuarios (sin XML)")
-            
+
+            # Normalizar payload para reducir rechazos del Ministerio (diagnósticos duplicados,
+            # tipo doc/usuario, fechas fuera de periodo RVC014/RVC039, usuarios sin servicios).
+            # En FINAL no se envía XML; el periodo se deriva del mes de fecha_factura.
+            resumen_norm = normalizar_payload_capita(
+                json_factura_capita,
+                fecha_factura=facturas[0].get('fecha_factura'),
+            )
+            print(f"[NORMALIZACION] {factura_global} (FINAL): {resumen_norm}")
+
             # Enviar al ministerio
             print(f"[ENVIO] Enviando factura capita FINAL (solo JSON)...")
             result = sender.send_invoice(json_factura_capita, tipo_cargue='FINAL')

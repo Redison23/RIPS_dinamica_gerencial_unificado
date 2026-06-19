@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional
 import base64
+import os
 
 from fastapi import HTTPException
 
@@ -7,6 +8,238 @@ from sql_server_conn import SQLServerConnection, PostgreSQLConnection as PSQL
 from EstructuraJson import EstructuraJsonRips
 import RipsQueries as queries
 import Utilities as b64
+from Utilities import Utilities as ut
+
+
+def _es_diagnostico_valido(valor: Any) -> bool:
+    """Un código de diagnóstico cuenta si es un texto no vacío y no un marcador nulo."""
+    if valor is None:
+        return False
+    texto = str(valor).strip()
+    return texto != "" and texto.upper() not in ("NULL", "NONE")
+
+
+def _deduplicar_grupo(item: Dict[str, Any], clave_principal: str, claves_relacionado: list) -> int:
+    """
+    Deja en None los `claves_relacionado` cuyo valor sea igual al diagnóstico principal
+    del grupo (`clave_principal`) o se repita entre los propios relacionados. Modifica el
+    ítem in place y devuelve cuántos códigos se eliminaron.
+    """
+    if not claves_relacionado:
+        return 0
+
+    vistos = set()
+    principal = item.get(clave_principal)
+    if _es_diagnostico_valido(principal):
+        vistos.add(str(principal).strip().upper())
+
+    eliminados = 0
+    for clave in claves_relacionado:
+        valor = item.get(clave)
+        if not _es_diagnostico_valido(valor):
+            continue
+        normalizado = str(valor).strip().upper()
+        if normalizado in vistos:
+            item[clave] = None      # diagnóstico duplicado: se elimina
+            eliminados += 1
+        else:
+            vistos.add(normalizado)
+    return eliminados
+
+
+def _deduplicar_diagnosticos_item(item: Dict[str, Any]) -> int:
+    """
+    Para un ítem de servicio (consulta, procedimiento, medicamento, hospitalización,
+    urgencia, etc.) deja en None los códigos de diagnóstico RELACIONADO duplicados, para
+    evitar los rechazos del Ministerio:
+      - relacionado == principal               -> RVC086
+      - relacionado repetido entre relacionados -> RVC087
+      - relacionado de egreso == principal de egreso (o repetido) -> RVC088
+
+    Se tratan por separado dos grupos, porque el diagnóstico de INGRESO y el de EGRESO
+    son independientes:
+      - Ingreso: `codDiagnosticoPrincipal`  + `codDiagnosticoRelacionado` / `...Relacionado1/2/3`
+      - Egreso:  `codDiagnosticoPrincipalE` + `codDiagnosticoRelacionadoE1/2/3`
+
+    Modifica el ítem in place. Devuelve cuántos códigos se eliminaron.
+    """
+    relacionados_egreso = sorted(
+        clave for clave in item.keys()
+        if clave.startswith("codDiagnosticoRelacionadoE")
+    )
+    relacionados_ingreso = sorted(
+        clave for clave in item.keys()
+        if clave.startswith("codDiagnosticoRelacionado")
+        and not clave.startswith("codDiagnosticoRelacionadoE")
+    )
+
+    eliminados = 0
+    eliminados += _deduplicar_grupo(item, "codDiagnosticoPrincipal", relacionados_ingreso)
+    eliminados += _deduplicar_grupo(item, "codDiagnosticoPrincipalE", relacionados_egreso)
+    return eliminados
+
+
+def limpiar_diagnosticos_duplicados(payload: Dict[str, Any]) -> int:
+    """
+    Recorre todos los usuarios y servicios del payload RIPS y elimina los códigos de
+    diagnóstico relacionado duplicados (ver `_deduplicar_diagnosticos_item`). Así el
+    paquete no falla por diagnósticos repetidos (RVC086 / RVC087). Modifica in place.
+    Devuelve el total de códigos eliminados.
+    """
+    if not isinstance(payload, dict):
+        return 0
+
+    rips = payload.get("rips", payload)
+    if not isinstance(rips, dict):
+        return 0
+
+    usuarios = rips.get("usuarios", [])
+    if not isinstance(usuarios, list):
+        return 0
+
+    total = 0
+    for usuario in usuarios:
+        if not isinstance(usuario, dict):
+            continue
+        servicios = usuario.get("servicios", {})
+        if not isinstance(servicios, dict):
+            continue
+        for lista_items in servicios.values():
+            if not isinstance(lista_items, list):
+                continue
+            for item in lista_items:
+                if isinstance(item, dict):
+                    total += _deduplicar_diagnosticos_item(item)
+    return total
+
+
+def _usuarios_payload(payload: Dict[str, Any]) -> list:
+    """Devuelve la lista de usuarios del payload RIPS de forma segura."""
+    if not isinstance(payload, dict):
+        return []
+    rips = payload.get("rips", payload)
+    if not isinstance(rips, dict):
+        return []
+    usuarios = rips.get("usuarios", [])
+    return usuarios if isinstance(usuarios, list) else []
+
+
+def corregir_tipos_documento_usuario(payload: Dict[str, Any], corregir_tipo_doc: bool = True) -> tuple:
+    """
+    Corrige por usuario el tipoDocumentoIdentificacion según la edad (RC/TI/CC, AS->edad)
+    y normaliza el tipoUsuario a valores válidos (01-04). El tipo de documento se corrige
+    usando la fecha de atención más temprana del usuario como referencia de edad.
+    Devuelve (docs_corregidos, tipos_usuario_corregidos).
+    """
+    n_doc = n_tu = 0
+    for u in _usuarios_payload(payload):
+        if not isinstance(u, dict):
+            continue
+        servicios = u.get("servicios", {}) or {}
+        if corregir_tipo_doc and u.get("fechaNacimiento"):
+            ref = ut.obtener_primera_fecha_atencion(servicios)
+            actual = u.get("tipoDocumentoIdentificacion")
+            nuevo = ut.corregir_tipo_documento(actual, u.get("fechaNacimiento"), ref)
+            if nuevo != actual:
+                u["tipoDocumentoIdentificacion"] = nuevo
+                n_doc += 1
+        actual_tu = u.get("tipoUsuario")
+        nuevo_tu = ut.corregir_tipo_usuario(actual_tu)
+        if nuevo_tu != actual_tu:
+            u["tipoUsuario"] = nuevo_tu
+            n_tu += 1
+    return n_doc, n_tu
+
+
+def ajustar_fechas_capita(payload: Dict[str, Any], fecha_factura=None,
+                          periodo_inicio=None, periodo_fin=None) -> int:
+    """
+    Ajusta las fechas de servicio de TODOS los usuarios al periodo de facturación
+    (RVC014) y corrige fechaEgreso<fechaInicioAtencion (RVC039). Devuelve el total ajustado.
+    """
+    total = 0
+    for u in _usuarios_payload(payload):
+        if isinstance(u, dict):
+            total += ut.ajustar_fechas_al_periodo(u.get("servicios", {}) or {},
+                                                  fecha_factura, periodo_inicio, periodo_fin)
+    return total
+
+
+def excluir_usuarios_sin_servicios(payload: Dict[str, Any]) -> list:
+    """
+    Elimina del payload los usuarios que quedaron sin ningún servicio (el Ministerio
+    los rechaza) y renumera el consecutivo de usuario de forma contigua (1..N).
+    Devuelve la lista de documentos excluidos.
+    """
+    if not isinstance(payload, dict):
+        return []
+    rips = payload.get("rips", payload)
+    if not isinstance(rips, dict):
+        return []
+    usuarios = rips.get("usuarios", [])
+    if not isinstance(usuarios, list):
+        return []
+
+    conservados, excluidos = [], []
+    for u in usuarios:
+        if not isinstance(u, dict):
+            continue
+        servicios = {k: v for k, v in (u.get("servicios") or {}).items() if v}
+        if not servicios:
+            excluidos.append(u.get("numDocumentoIdentificacion"))
+            continue
+        u["servicios"] = servicios
+        conservados.append(u)
+
+    for idx, u in enumerate(conservados, start=1):
+        u["consecutivo"] = idx
+
+    rips["usuarios"] = conservados
+    return excluidos
+
+
+def normalizar_payload_capita(payload: Dict[str, Any], fecha_factura=None, xml_data=None,
+                              aplicar_periodo: bool = True,
+                              excluir_sin_servicios: bool = True) -> Dict[str, Any]:
+    """
+    Aplica todas las normalizaciones que reducen rechazos del Ministerio sobre el payload
+    de capita (modifica in place):
+      1. Corrige tipoDocumentoIdentificacion por edad y tipoUsuario (01-04).
+      2. Elimina diagnósticos relacionados duplicados (RVC086/087/088).
+      3. Ajusta fechas fuera de periodo (RVC014) y fechaEgreso<ingreso (RVC039).
+      4. Excluye usuarios sin servicios y renumera consecutivos.
+    El paso 1 (tipo documento) se puede desactivar con la variable CAPITA_CORREGIR_TIPO_DOC=false.
+    Devuelve un resumen con los conteos de cada corrección.
+    """
+    resumen: Dict[str, Any] = {}
+
+    corregir_doc = os.getenv("CAPITA_CORREGIR_TIPO_DOC", "true").strip().lower() in ("1", "true", "yes", "si", "sí")
+    n_doc, n_tu = corregir_tipos_documento_usuario(payload, corregir_tipo_doc=corregir_doc)
+    resumen["tipo_doc_corregidos"] = n_doc
+    resumen["tipo_usuario_corregidos"] = n_tu
+
+    resumen["diagnosticos_eliminados"] = limpiar_diagnosticos_duplicados(payload)
+
+    if aplicar_periodo and (xml_data or fecha_factura):
+        periodo_inicio, periodo_fin = (None, None)
+        if xml_data:
+            periodo_inicio, periodo_fin = ut.obtener_periodo_facturacion_xml(xml_data)
+        resumen["fechas_ajustadas"] = ajustar_fechas_capita(payload, fecha_factura, periodo_inicio, periodo_fin)
+    else:
+        # Sin periodo disponible: al menos corregir egreso<ingreso (RVC039), que es seguro.
+        total = 0
+        for u in _usuarios_payload(payload):
+            if isinstance(u, dict):
+                total += ut.corregir_fechas_ingreso_egreso(u.get("servicios", {}) or {})
+        resumen["fechas_ajustadas"] = total
+
+    if excluir_sin_servicios:
+        excluidos = excluir_usuarios_sin_servicios(payload)
+        resumen["usuarios_excluidos"] = len(excluidos)
+    else:
+        resumen["usuarios_excluidos"] = 0
+
+    return resumen
 
 
 def validar_estructura_fev_rips_payload(payload: Dict[str, Any]) -> Optional[str]:
@@ -132,6 +365,10 @@ def construir_payload_fev_rips_desde_num_factura(
                 servicios[tipo_servicio].append(item_actualizado)
 
     json_factura["rips"]["usuarios"][0]["servicios"] = {k: v for k, v in servicios.items() if v}
+
+    # Normalización para reducir rechazos (diagnósticos duplicados, tipo doc/usuario, egreso<ingreso).
+    # En EVENTO no se mueve por periodo ni se excluyen usuarios (es un único usuario).
+    normalizar_payload_capita(json_factura, aplicar_periodo=False, excluir_sin_servicios=False)
 
     datos_xml = queries.RipsQueries.get_datos_attached(conn_postgre, num_factura)
     xml_data = datos_xml[0].get("attached_document", "") if datos_xml else ""

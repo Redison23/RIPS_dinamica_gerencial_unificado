@@ -139,6 +139,14 @@ def enviar_evento_individual(num_factura: str, sender) -> dict:
         if not conn_sql.connect():
             return {'success': False, 'numFactura': num_factura, 'error': 'No se pudo conectar a SQL Server'}
 
+        # No reenviar si la factura EVENTO ya tiene CUV (ya fue enviada/aprobada).
+        # Reenviarla sobrescribiría los soportes ya guardados (save_json_soporte_to_db
+        # borra y reinserta), corrompiendo el soporte de una factura ya correcta.
+        cuv_existente = RipsSender.factura_tiene_cuv_valido(conn_sql, num_factura, tipo_cargue='INICIAL')
+        if cuv_existente:
+            evento_logger.info(f"[SKIP] Evento {num_factura} ya tiene CUV; no se reenvía (se preservan soportes).")
+            return {'success': True, 'skipped': True, 'numFactura': num_factura, 'codigo_cuv': cuv_existente}
+
         conn_postgre = _nueva_conexion_postgre()
         if not conn_postgre.connect():
             return {'success': False, 'numFactura': num_factura, 'error': 'No se pudo conectar a PostgreSQL'}

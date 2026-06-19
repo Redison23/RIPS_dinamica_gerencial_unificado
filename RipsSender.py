@@ -468,6 +468,63 @@ class RipsSender:
             return ""
     
     #Actualizacion en base de datos
+    @staticmethod
+    def factura_tiene_cuv_valido(conn, num_factura, tipo_cargue='FINAL'):
+        """
+        Indica si la factura YA tiene un CUV válido para ese tipo de cargue. En ese caso
+        NO debe reenviarse, para no sobrescribir el CUV y los datos ya aprobados por el
+        Ministerio.
+
+          - INICIAL -> revisa codigo_cuv
+          - FINAL   -> revisa codigo_cuv_global
+
+        Un CUV válido es un hash no vacío y sin espacios. Los mensajes de rechazo del tipo
+        'No aplica a paquetes procesados en estado [RECHAZADO]...' contienen espacios, por
+        lo que NO se consideran CUV y permiten reintentar el envío.
+
+        Devuelve el CUV existente (str) si la factura ya está aprobada, o None si NO tiene CUV.
+
+        IMPORTANTE: es FAIL-CLOSED. Si NO se puede verificar el estado del CUV (BD caída,
+        timeout, etc.) LANZA una excepción en vez de devolver None, para que el llamador
+        ABORTE el envío. Devolver None ante un error haría creer que la factura no tiene CUV
+        y permitiría reenviarla, sobrescribiendo (borrando/reinsertando) los soportes de una
+        factura que quizá ya estaba aprobada.
+        """
+        columna = 'codigo_cuv' if str(tipo_cargue).upper() == 'INICIAL' else 'codigo_cuv_global'
+        consulta = f"SELECT [{columna}] AS cuv FROM dbo.rips_af WHERE [numFactura] = ?"
+
+        ultimo_error = None
+        for intento in range(2):
+            try:
+                # Conexión explícita: no depender solo del auto-connect de execute_query.
+                if not getattr(conn, "conn", None) and hasattr(conn, "connect"):
+                    if not conn.connect():
+                        raise ConnectionError("No se pudo conectar a SQL Server para verificar el CUV")
+
+                filas = conn.execute_query(consulta, (num_factura,))
+                # Consulta OK: 'sin fila' o CUV vacío significan que SÍ se puede (re)enviar.
+                if not filas:
+                    return None
+                cuv = (filas[0].get('cuv') or '').strip()
+                if cuv and ' ' not in cuv and cuv.upper() != 'NULL':
+                    return cuv
+                return None
+            except Exception as e:
+                ultimo_error = e
+                print(f"[CUV-GUARD] Intento {intento + 1}/2 falló verificando CUV de {num_factura}: {e}")
+                # Forzar reconexión en el siguiente intento.
+                try:
+                    if getattr(conn, "conn", None):
+                        conn.close()
+                except Exception:
+                    pass
+
+        # Fail-closed: no se pudo confirmar el estado del CUV -> NO permitir el envío.
+        raise RuntimeError(
+            f"No se pudo verificar el estado del CUV de la factura {num_factura}; "
+            f"se aborta el envío para no arriesgar sobrescribir los soportes. Detalle: {ultimo_error}"
+        )
+
     def update_invoice_status(self, conn, num_factura, result, tipo_cargue='FINAL'):
         """
         Actualiza el estado de la factura en la base de datos con el resultado del envío

@@ -6,6 +6,7 @@ Ejecuta diariamente a las 12:00 AM (medianoche)
 
 import os
 import logging
+import threading
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -106,9 +107,18 @@ def get_capitas_pendientes():
     try:
         conn.connect()
         
+        # Ventana de selección configurable (días hacia atrás). Antes fija en 40, lo que
+        # dejaba fuera capitas pendientes de meses anteriores. Configurable con CAPITA_VENTANA_DIAS.
+        try:
+            ventana_dias = int(os.getenv('CAPITA_VENTANA_DIAS', '90'))
+            if ventana_dias <= 0:
+                ventana_dias = 90
+        except (TypeError, ValueError):
+            ventana_dias = 90
+
         # Obtener capitas pendientes de envío
         # La factura global debe existir como registro en rips_af y NO tener código CUV
-        query = """
+        query = f"""
         SELECT DISTINCT AF.factura_global
         FROM rips_af AF
         INNER JOIN rips_af FG ON AF.factura_global = FG.numFactura
@@ -116,7 +126,7 @@ def get_capitas_pendientes():
         AND AF.factura_global IS NOT NULL
         AND AF.factura_global != ''
         AND AF.estado_registro = 'A'
-        AND AF.fecha_factura >= DATEADD(day, -40, GETDATE())
+        AND AF.fecha_factura >= DATEADD(day, -{ventana_dias}, GETDATE())
         AND (FG.codigo_cuv IS NULL OR FG.codigo_cuv = '' OR FG.codigo_cuv = 'NULL')
         ORDER BY AF.factura_global
         """
@@ -173,7 +183,13 @@ def enviar_capita_inicial(factura_global: str) -> dict:
         if not auth_result['success']:
             scheduler_logger.error(f"[ERROR] Autenticación fallida para {factura_global}")
             return {'success': False, 'error': 'Error en autenticación con el ministerio'}
-        
+
+        # No reenviar si la capita ya tiene CUV inicial (no sobrescribir lo ya aprobado)
+        cuv_existente = RipsSender.factura_tiene_cuv_valido(conSqlServer, factura_global, tipo_cargue='INICIAL')
+        if cuv_existente:
+            scheduler_logger.info(f"[SKIP] {factura_global} ya tiene CUV inicial; no se reenvía.")
+            return {'success': True, 'skipped': True, 'factura_global': factura_global, 'codigo_cuv': cuv_existente}
+
         # Crear estructura only_xml
         json_factura_capita = EstructuraJsonRips.only_xml()
         
@@ -214,7 +230,8 @@ def enviar_capita_inicial(factura_global: str) -> dict:
             result['success'] = True
         
         # Actualizar estado en BD
-        conSqlServer.connect()
+        if not getattr(conSqlServer, "conn", None):
+            conSqlServer.connect()
         update_success = sender.update_invoice_status(conSqlServer, factura_global, result, tipo_cargue='INICIAL')
         
         # Guardar JSON soporte
@@ -255,7 +272,25 @@ def enviar_capita_inicial(factura_global: str) -> dict:
                 pass
 
 
+# Lock para evitar corridas solapadas del envío de capitas (scheduler + ejecución manual)
+_job_lock = threading.Lock()
+
+
 def job_enviar_capitas_iniciales():
+    """
+    Punto de entrada del job con guard de concurrencia: si ya hay un envío en curso,
+    omite esta corrida en vez de solaparse (evita doble envío y contención de BD).
+    """
+    if not _job_lock.acquire(blocking=False):
+        scheduler_logger.warning("[SKIP] Ya hay un envío de capitas en ejecución; se omite esta corrida.")
+        return
+    try:
+        _job_enviar_capitas_iniciales_impl()
+    finally:
+        _job_lock.release()
+
+
+def _job_enviar_capitas_iniciales_impl():
     """
     Job que se ejecuta diariamente para enviar todas las capitas iniciales pendientes.
     """
