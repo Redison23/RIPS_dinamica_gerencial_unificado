@@ -124,11 +124,18 @@ def _usuarios_payload(payload: Dict[str, Any]) -> list:
     return usuarios if isinstance(usuarios, list) else []
 
 
-def corregir_tipos_documento_usuario(payload: Dict[str, Any], corregir_tipo_doc: bool = True) -> tuple:
+def corregir_tipos_documento_usuario(payload: Dict[str, Any], corregir_tipo_doc: bool = True,
+                                     corregir_tipo_usuario: bool = True) -> tuple:
     """
     Corrige por usuario el tipoDocumentoIdentificacion según la edad (RC/TI/CC, AS->edad)
-    y normaliza el tipoUsuario a valores válidos (01-04). El tipo de documento se corrige
-    usando la fecha de atención más temprana del usuario como referencia de edad.
+    y, solo si `corregir_tipo_usuario` es True, normaliza el tipoUsuario a valores válidos
+    (01-04). El tipo de documento se corrige usando la fecha de atención más temprana del
+    usuario como referencia de edad.
+
+    OJO: forzar el tipoUsuario a 04 SOLO es válido para CAPITA. En EVENTO el tipoUsuario
+    debe conservar el valor real reportado (p.ej. 05), porque debe coincidir con el plan de
+    beneficios informado en el XML; si se fuerza a 04 se genera la inconsistencia RIPS-XML
+    y el Ministerio rechaza el paquete sin devolver CUV.
     Devuelve (docs_corregidos, tipos_usuario_corregidos).
     """
     n_doc = n_tu = 0
@@ -143,11 +150,12 @@ def corregir_tipos_documento_usuario(payload: Dict[str, Any], corregir_tipo_doc:
             if nuevo != actual:
                 u["tipoDocumentoIdentificacion"] = nuevo
                 n_doc += 1
-        actual_tu = u.get("tipoUsuario")
-        nuevo_tu = ut.corregir_tipo_usuario(actual_tu)
-        if nuevo_tu != actual_tu:
-            u["tipoUsuario"] = nuevo_tu
-            n_tu += 1
+        if corregir_tipo_usuario:
+            actual_tu = u.get("tipoUsuario")
+            nuevo_tu = ut.corregir_tipo_usuario(actual_tu)
+            if nuevo_tu != actual_tu:
+                u["tipoUsuario"] = nuevo_tu
+                n_tu += 1
     return n_doc, n_tu
 
 
@@ -200,21 +208,26 @@ def excluir_usuarios_sin_servicios(payload: Dict[str, Any]) -> list:
 
 def normalizar_payload_capita(payload: Dict[str, Any], fecha_factura=None, xml_data=None,
                               aplicar_periodo: bool = True,
-                              excluir_sin_servicios: bool = True) -> Dict[str, Any]:
+                              excluir_sin_servicios: bool = True,
+                              corregir_tipo_usuario: bool = True) -> Dict[str, Any]:
     """
     Aplica todas las normalizaciones que reducen rechazos del Ministerio sobre el payload
     de capita (modifica in place):
-      1. Corrige tipoDocumentoIdentificacion por edad y tipoUsuario (01-04).
+      1. Corrige tipoDocumentoIdentificacion por edad y, si `corregir_tipo_usuario` es True,
+         normaliza el tipoUsuario a 01-04.
       2. Elimina diagnósticos relacionados duplicados (RVC086/087/088).
       3. Ajusta fechas fuera de periodo (RVC014) y fechaEgreso<ingreso (RVC039).
       4. Excluye usuarios sin servicios y renumera consecutivos.
     El paso 1 (tipo documento) se puede desactivar con la variable CAPITA_CORREGIR_TIPO_DOC=false.
+    La normalización de tipoUsuario solo aplica a CAPITA; EVENTO debe llamar con
+    `corregir_tipo_usuario=False` para conservar el tipoUsuario real (debe coincidir con el XML).
     Devuelve un resumen con los conteos de cada corrección.
     """
     resumen: Dict[str, Any] = {}
 
     corregir_doc = os.getenv("CAPITA_CORREGIR_TIPO_DOC", "true").strip().lower() in ("1", "true", "yes", "si", "sí")
-    n_doc, n_tu = corregir_tipos_documento_usuario(payload, corregir_tipo_doc=corregir_doc)
+    n_doc, n_tu = corregir_tipos_documento_usuario(payload, corregir_tipo_doc=corregir_doc,
+                                                   corregir_tipo_usuario=corregir_tipo_usuario)
     resumen["tipo_doc_corregidos"] = n_doc
     resumen["tipo_usuario_corregidos"] = n_tu
 
@@ -366,9 +379,13 @@ def construir_payload_fev_rips_desde_num_factura(
 
     json_factura["rips"]["usuarios"][0]["servicios"] = {k: v for k, v in servicios.items() if v}
 
-    # Normalización para reducir rechazos (diagnósticos duplicados, tipo doc/usuario, egreso<ingreso).
-    # En EVENTO no se mueve por periodo ni se excluyen usuarios (es un único usuario).
-    normalizar_payload_capita(json_factura, aplicar_periodo=False, excluir_sin_servicios=False)
+    # Normalización para reducir rechazos (diagnósticos duplicados, tipo doc, egreso<ingreso).
+    # En EVENTO no se mueve por periodo ni se excluyen usuarios (es un único usuario) y, sobre
+    # todo, NO se corrige el tipoUsuario: debe conservar el valor real reportado (p.ej. 05) para
+    # coincidir con el plan de beneficios del XML. Forzarlo a 04 genera la inconsistencia
+    # RIPS-XML y el Ministerio rechaza sin devolver CUV. Esa corrección es exclusiva de CAPITA.
+    normalizar_payload_capita(json_factura, aplicar_periodo=False, excluir_sin_servicios=False,
+                              corregir_tipo_usuario=False)
 
     datos_xml = queries.RipsQueries.get_datos_attached(conn_postgre, num_factura)
     xml_data = datos_xml[0].get("attached_document", "") if datos_xml else ""

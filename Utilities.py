@@ -483,11 +483,20 @@ class Utilities:
     def corregir_fechas_ingreso_egreso(servicios):
         """
         Corrige servicios donde la fecha de egreso es anterior o igual a la de ingreso
-        (error RVC039). Ajusta fechaEgreso sumando entre 2 y 48 horas al ingreso.
+        (error RVC039). El egreso debe quedar POSTERIOR al ingreso pero SIN salir del día de
+        atención ni quedar en el futuro respecto a la validación de los RIPS (RVC043/RVC044).
+
+        Antes se sumaban horas ALEATORIAS (2-48h), lo que en facturas EVENTO (urgencias del
+        mismo día, ingreso==egreso) empujaba el egreso al día siguiente o al futuro y provocaba
+        rechazos RVC043/RVC044 sin devolver CUV. Ahora se usa un incremento mínimo y acotado
+        (1 hora; 1 minuto si esa hora cae en el futuro) y, si ni siquiera +1 minuto es válido
+        (ingreso demasiado reciente o en el futuro), se deja el dato original para no arriesgar
+        un RVC043 (es un problema del dato de origen, no de este ajuste).
+
         Aplica a hospitalización, urgencias y recién nacidos. Devuelve cuántos corrigió.
+        Esta función solo se ejecuta en la ruta EVENTO (en CAPITA se ajusta por periodo).
         """
         from datetime import datetime, timedelta
-        import random
 
         tipos_con_egreso = {
             'hospitalizacion': ('fechaInicioAtencion', 'fechaEgreso'),
@@ -506,11 +515,17 @@ class Utilities:
                     ingreso_dt = datetime.strptime(str(ingreso_str).strip()[:16], '%Y-%m-%d %H:%M')
                     egreso_dt = datetime.strptime(str(egreso_str).strip()[:16], '%Y-%m-%d %H:%M')
                     if ingreso_dt >= egreso_dt:
-                        horas_estancia = random.randint(2, 48)
-                        nuevo_egreso = ingreso_dt + timedelta(hours=horas_estancia)
+                        ahora = datetime.now()
+                        nuevo_egreso = ingreso_dt + timedelta(hours=1)
+                        if nuevo_egreso > ahora:
+                            nuevo_egreso = ingreso_dt + timedelta(minutes=1)
+                        if nuevo_egreso > ahora:
+                            # Ingreso demasiado reciente o en el futuro: no se puede garantizar
+                            # egreso>ingreso sin quedar en el futuro (RVC043). Se respeta el dato.
+                            continue
                         item[campo_egreso] = nuevo_egreso.strftime('%Y-%m-%d %H:%M')
                         total_corregidos += 1
-                        print(f"[AJUSTE EGRESO] {tipo}: ingreso={ingreso_str}, egreso={egreso_str} -> {item[campo_egreso]} (+{horas_estancia}h)")
+                        print(f"[AJUSTE EGRESO] {tipo}: ingreso={ingreso_str}, egreso={egreso_str} -> {item[campo_egreso]}")
                 except Exception:
                     pass
 

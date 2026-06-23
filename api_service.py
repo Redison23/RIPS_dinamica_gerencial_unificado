@@ -195,6 +195,13 @@ class KiroxFevripsService(win32serviceutil.ServiceFramework):
 
     def _launch_uvicorn(self, cmd, script_dir):
         """Lanza uvicorn como subproceso y engancha los hilos de logging."""
+        # Forzar UTF-8 en el hijo: leemos su stdout/stderr como UTF-8 (encoding="utf-8"), pero
+        # por defecto en Windows el proceso hijo escribe en cp1252, lo que producía mojibake en
+        # los logs (p.ej. "validaci�n", "facturaci�n"). PYTHONUTF8/PYTHONIOENCODING alinean la
+        # codificación de salida del hijo con la lectura del padre.
+        child_env = os.environ.copy()
+        child_env["PYTHONUTF8"] = "1"
+        child_env["PYTHONIOENCODING"] = "utf-8"
         self.process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -203,7 +210,8 @@ class KiroxFevripsService(win32serviceutil.ServiceFramework):
             text=True,
             encoding="utf-8",
             errors="replace",
-            bufsize=1
+            bufsize=1,
+            env=child_env
         )
         self.stdout_thread = threading.Thread(
             target=self._stream_subprocess_output,
