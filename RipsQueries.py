@@ -153,7 +153,7 @@ class RipsQueries:
     @staticmethod
     def get_datos_am(conn, id_factura: int):
         query = """
-            SELECT [codPrestador], [numAutorizacion], [idMIPRES], [fechaDispensAdmon],
+            SELECT [codPrestador], [idMIPRES], [fechaDispensAdmon],
             [codDiagnosticoPrincipal], [codDiagnosticoRelacionado], [tipoMedicamento],
             [codTecnologiaSalud], [nomTecnologiaSalud], [concentracionMedicamento], [unidadMedida],
             [formaFarmaceutica], [unidadMinDispensa], [cantidadMedicamento], [diasTratamiento],
@@ -172,7 +172,10 @@ class RipsQueries:
         for fila in listaConsulta:
             valoresMapeados = {
                 "codPrestador": str(fila["codPrestador"]),
-                "numAutorizacion": str(fila["numAutorizacion"]),
+                # numAutorizacion ELIMINADO para medicamentos (M02) por Resolucion 948 de 2026:
+                # "por disposicion normativa los medicamentos no requieren autorizacion".
+                # El validador rechaza si se informa. Por eso ya no se incluye en el bloque AM.
+                # (Los demas bloques -AC/AP/AH/AT- sí lo conservan cuando aplica.)
                 "idMIPRES": fila["idMIPRES"],
                 "fechaDispensAdmon": ut.format_datetime(fila["fechaDispensAdmon"]),
                 "codDiagnosticoPrincipal": ut.z000_diag(fila["codDiagnosticoPrincipal"]),
